@@ -10,6 +10,7 @@ import Controls from '@/components/components_map/Controls';
 import StatusBadge from '@/components/components_map/StatusBadge';
 import AlertBanner from '@/components/components_map/AlertBanner';
 import CommunityOverlay from '@/components/components_map/CommunityOverlay';
+import { getMockNearbyUsers } from '@/utils/mockNearbyUsers';
 import { useCommunity } from '@/hooks/useCommunity';
 
 // Leaflet uses 'window' which causes SSR issues, so we dynamic import MapView
@@ -50,25 +51,25 @@ export default function MapPage() {
     setIsRefreshingUsers(true);
 
     try {
-      await new Promise(resolve => setTimeout(resolve, 800));
+      // Get or create a persistent userId for mapping presence
+      let mapUserId = '';
+      if (typeof window !== 'undefined') {
+        mapUserId = localStorage.getItem('mapUserId') || '';
+        if (!mapUserId) {
+          mapUserId = `user_${Math.random().toString(36).substr(2, 9)}`;
+          localStorage.setItem('mapUserId', mapUserId);
+        }
+      }
 
-      const mockNearbyCount = Math.floor(Math.random() * 4) + 3;
-      const localUsers: NearbyUser[] = Array.from({ length: mockNearbyCount }).map((_, i) => {
-        const latOffset = (Math.random() - 0.5) * 0.03;
-        const lngOffset = (Math.random() - 0.5) * 0.03;
-        return {
-          id: `user-${Date.now()}-${i}`,
-          position: {
-            lat: userPosition.lat + latOffset,
-            lng: userPosition.lng + lngOffset
-          },
-          avatarSeed: Math.floor(Math.random() * 10),
-          lastSeen: new Date().toISOString()
-        };
-      });
-      setNearbyUsers(localUsers);
+      // Use the local mock logic for testing/demo purposes since Hugging Face is constrained
+      const data = getMockNearbyUsers(userPosition.lat, userPosition.lng, 10, mapUserId);
+      
+      // Ensure we set an array, even if empty
+      setNearbyUsers(Array.isArray(data) ? data : []);
     } catch (error) {
       console.error('Failed to fetch nearby users', error);
+
+      setNearbyUsers([]);
     } finally {
       setIsRefreshingUsers(false);
     }

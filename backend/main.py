@@ -14,6 +14,9 @@ import joblib
 from google import genai
 from groq import Groq as GroqClient
 from dotenv import load_dotenv
+import math
+import time
+import random
 
 load_dotenv()
 
@@ -25,6 +28,19 @@ active_websockets = []
 csi_simulation_task = None
 alert_recipient_email = os.getenv("CARETAKER_EMAIL")  # Default/fallback
 force_fall_event = False
+
+# Nearby Users Global State
+active_users = {} # user_id -> { lat, lng, last_seen, avatar_seed }
+
+def haversine(lat1, lon1, lat2, lon2):
+    R = 6371  # radius of Earth in km
+    dLat = math.radians(lat2 - lat1)
+    dLon = math.radians(lon2 - lon1)
+    a = math.sin(dLat/2) * math.sin(dLat/2) + \
+        math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * \
+        math.sin(dLon/2) * math.sin(dLon/2)
+    c = 2 * math.asin(math.sqrt(a))
+    return R * c
 
 # Webpage Summarization state (Hugging Face Persistent Storage Support)
 DATA_DIR = "/data" if os.path.exists("/data") else os.path.dirname(__file__)
@@ -304,6 +320,37 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
+
+@app.get("/api/nearby-users")
+def get_nearby_users(lat: float, lng: float, radius: float = 10, user_id: str = None):
+    # If a user is actively calling this, store their presence
+    if user_id:
+        if user_id not in active_users:
+            active_users[user_id] = {"avatar_seed": random.randint(1, 100)}
+        active_users[user_id].update({"lat": lat, "lng": lng, "last_seen": time.time()})
+    
+    # Prune inactive users (e.g., > 5 mins)
+    current_time = time.time()
+    for uid in list(active_users.keys()):
+        if current_time - active_users[uid].get("last_seen", current_time) > 300:
+            del active_users[uid]
+            
+    # Find nearby users
+    nearby = []
+    for uid, data in active_users.items():
+        if user_id and uid == user_id:
+            continue  # Don't return self
+            
+        dist = haversine(lat, lng, data.get("lat", 0), data.get("lng", 0))
+        if dist <= radius:
+            nearby.append({
+                "id": uid,
+                "position": {"lat": data["lat"], "lng": data["lng"]},
+                "avatarSeed": data["avatar_seed"],
+                "distance": dist
+            })
+    return nearby
+
 class AlertConfig(BaseModel):
     email: str
 
