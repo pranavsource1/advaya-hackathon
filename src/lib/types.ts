@@ -3,6 +3,13 @@ export interface GeoPosition {
   lng: number;
 }
 
+export interface NearbyUser {
+  id: string;
+  position: GeoPosition;
+  avatarSeed: number;
+  lastSeen?: string;
+}
+
 export interface SafeZone {
   center: GeoPosition;
   radius: number; // in meters

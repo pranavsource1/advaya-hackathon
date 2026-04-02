@@ -1,34 +1,37 @@
-import { FinanceTransaction } from '../lib/types';
+import { registerPlugin } from '@capacitor/core';
+import { parseBankSMS } from './smsParser';
+import { FinanceTransaction } from '../types';
+
+export interface SmsListenerPlugin {
+  addListener(
+    eventName: 'smsReceived',
+    listenerFunc: (data: { body: string; sender: string; timestamp: number }) => void
+  ): Promise<{ remove: () => void }>;
+}
+
+// Register our custom native plugin
+const SmsListener = registerPlugin<SmsListenerPlugin>('SmsListener');
+
+type OnIncomeDetected = (transaction: FinanceTransaction) => void;
 
 /**
- * simulatedSmsDetection: A mock service for SMS transaction detection.
- * In a real production app on Capacitor, this would use a plugin
- * like capacitor-voice-recorder or similar depending on OS capabilities,
- * or ideally Capacitor SMS Receiver for Android.
+ * Initializes the real-time SMS listener.
+ * This should be called once in the app layout or a high-level hook.
  */
-export async function startRealTimeSmsListener(onDetection: (t: FinanceTransaction) => void) {
-  console.log('Service: SMS Listener started (Simulation Mode)');
-
-  // Simulate an SMS arrival every 45-60 seconds 
-  const interval = setInterval(() => {
-    const isMockTrigger = Math.random() > 0.8; // Only trigger sometimes to simulate reality
-    if (isMockTrigger) {
-      const mockTransaction: FinanceTransaction = {
-        id: Math.random().toString(36).substring(7),
-        amount: Math.floor(Math.random() * 500) + 50,
-        type: 'expense',
-        category: 'Auto-detected',
-        note: 'Simulated SMS detection from bank alert',
-        date: new Date().toISOString()
-      };
-      onDetection(mockTransaction);
+export async function startRealTimeSmsListener(onIncomeDetected: OnIncomeDetected) {
+  console.log('Starting Real-Time SMS Listener...');
+  
+  const handler = await SmsListener.addListener('smsReceived', (data) => {
+    console.log('New SMS received via native bridge:', data.sender);
+    
+    // Parse the incoming message
+    const transaction = parseBankSMS(data.body, data.sender);
+    
+    if (transaction) {
+      console.log('Bank Income Detected!', transaction.amount);
+      onIncomeDetected(transaction);
     }
-  }, 45000);
+  });
 
-  return {
-    remove: () => {
-      console.log('Service: SMS Listener stopped');
-      clearInterval(interval);
-    }
-  };
+  return handler;
 }

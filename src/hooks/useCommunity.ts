@@ -1,33 +1,9 @@
-'use client';
-
 import { useState, useEffect, useCallback } from 'react';
-import { CommunityEvent } from '../lib/types';
+import { CommunityEvent } from '../types';
 
 const STORAGE_KEY = 'geofence_guardian_events';
 
-// Default mock events to pre-populate the community map
-const MOCK_EVENTS: CommunityEvent[] = [
-  {
-    id: 'e1',
-    title: 'Free Blood Pressure Checkup',
-    location: 'Community Center, Ward 5',
-    time: 'Tomorrow, 10:00 AM',
-    description: 'Come and get your blood pressure checked for free by our volunteer nurses.',
-    joined: false,
-    interestedCount: 12,
-    isInterested: false
-  },
-  {
-    id: 'e2',
-    title: 'Yoga for Seniors',
-    location: 'Central Park North',
-    time: 'Sat, Oct 25, 7:00 AM',
-    description: 'A gentle yoga session focused on flexibility and balance for 60+ age group.',
-    joined: true,
-    interestedCount: 8,
-    isInterested: true
-  }
-];
+const MOCK_EVENTS: CommunityEvent[] = [];
 
 export function useCommunity() {
   const [events, setEvents] = useState<CommunityEvent[]>([]);
@@ -40,18 +16,21 @@ export function useCommunity() {
       if (stored) {
         try {
           const parsed = JSON.parse(stored) as CommunityEvent[];
-          if (parsed.length > 0) {
-            setEvents(parsed);
-          } else {
-            setEvents(MOCK_EVENTS);
-          }
+          // Defer state update to avoid synchronous setState in effect warnings
+          setTimeout(() => {
+            if (parsed.length > 0) {
+              setEvents(parsed);
+            } else {
+              setEvents(MOCK_EVENTS);
+            }
+          }, 0);
         } catch {
-          setEvents(MOCK_EVENTS);
+          setTimeout(() => setEvents(MOCK_EVENTS), 0);
         }
       } else {
-        setEvents(MOCK_EVENTS);
+        setTimeout(() => setEvents(MOCK_EVENTS), 0);
       }
-      setIsLoaded(true);
+      setTimeout(() => setIsLoaded(true), 0);
     }
   }, []);
 

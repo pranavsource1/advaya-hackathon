@@ -1,253 +1,225 @@
 'use client';
 
-import { useState, useEffect } from 'react';
-import Link from 'next/link';
-import { Geolocation } from '@capacitor/geolocation';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import dynamic from 'next/dynamic';
+import { GeoPosition, SafeZone, GeofenceStatus, TrackingState, CommunityEvent, NearbyUser } from '@/lib/types';
+import { locationService } from '@/services/locationService';
+import { notificationService } from '@/services/notificationService';
+import { isInsideGeofence } from '@/utils/geofence';
+import Controls from '@/components/components_map/Controls';
+import StatusBadge from '@/components/components_map/StatusBadge';
+import AlertBanner from '@/components/components_map/AlertBanner';
+import CommunityOverlay from '@/components/components_map/CommunityOverlay';
 import { useCommunity } from '@/hooks/useCommunity';
-import { Map as MapIcon, Navigation, Plus, Users, Calendar, MapPin, Search, Filter } from 'lucide-react';
+
+// Leaflet uses 'window' which causes SSR issues, so we dynamic import MapView
+const DynamicMapView = dynamic(() => import('@/components/components_map/MapView'), {
+  ssr: false,
+  loading: () => (
+    <div className="w-full h-screen bg-gray-100 flex items-center justify-center">
+      <div className="flex flex-col items-center gap-4">
+        <div className="w-10 h-10 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+        <p className="text-gray-500 font-medium">Loading Map...</p>
+      </div>
+    </div>
+  ),
+});
 
 export default function MapPage() {
-  const { events, joinEvent, toggleInterested, addEvent, isLoaded } = useCommunity();
-  const [userLocation, setUserLocation] = useState<{ lat: number; lng: number } | null>(null);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [showAdd, setShowAdd] = useState(false);
-  
-  // New Event Form
-  const [newTitle, setNewTitle] = useState('');
-  const [newLoc, setNewLoc] = useState('');
-  const [newTime, setNewTime] = useState('');
-  const [newDesc, setNewDesc] = useState('');
+  const [userPosition, setUserPosition] = useState<GeoPosition | null>(null);
+  const [safeZone, setSafeZone] = useState<SafeZone | null>(null);
+  const [status, setStatus] = useState<GeofenceStatus>('unknown');
+  const [trackingState, setTrackingState] = useState<TrackingState>('idle');
 
-  // Get GPS Location via Capacitor
-  useEffect(() => {
-    const getPos = async () => {
-      try {
-        const permissions = await Geolocation.checkPermissions();
-        if (permissions.location !== 'granted') {
-          await Geolocation.requestPermissions();
-        }
-        const position = await Geolocation.getCurrentPosition();
-        setUserLocation({
-          lat: position.coords.latitude,
-          lng: position.coords.longitude
-        });
-      } catch (e) {
-        console.error('Error getting location:', e);
-        // Fallback to a default location (e.g., Bangalore)
-        setUserLocation({ lat: 12.9716, lng: 77.5946 });
-      }
-    };
-    getPos();
+  // UI State
+  const [radius, setRadius] = useState<number>(100);
+  const [showAlert, setShowAlert] = useState<boolean>(false);
+  const [isCommunityOpen, setIsCommunityOpen] = useState<boolean>(false);
+  const [focusedEvent, setFocusedEvent] = useState<CommunityEvent | null>(null);
+  const focusResetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Lifted Community State
+  const { events, addEvent, joinEvent, toggleInterested, removeEvent, isLoaded } = useCommunity();
+
+  // Nearby Users State (Snapchat Map style)
+  const [nearbyUsers, setNearbyUsers] = useState<NearbyUser[]>([]);
+  const [isRefreshingUsers, setIsRefreshingUsers] = useState<boolean>(false);
+
+  const handleRefreshMap = useCallback(async () => {
+    if (!userPosition) return;
+    setIsRefreshingUsers(true);
+
+    try {
+      await new Promise(resolve => setTimeout(resolve, 800));
+
+      const mockNearbyCount = Math.floor(Math.random() * 4) + 3;
+      const localUsers: NearbyUser[] = Array.from({ length: mockNearbyCount }).map((_, i) => {
+        const latOffset = (Math.random() - 0.5) * 0.03;
+        const lngOffset = (Math.random() - 0.5) * 0.03;
+        return {
+          id: `user-${Date.now()}-${i}`,
+          position: {
+            lat: userPosition.lat + latOffset,
+            lng: userPosition.lng + lngOffset
+          },
+          avatarSeed: Math.floor(Math.random() * 10),
+          lastSeen: new Date().toISOString()
+        };
+      });
+      setNearbyUsers(localUsers);
+    } catch (error) {
+      console.error('Failed to fetch nearby users', error);
+    } finally {
+      setIsRefreshingUsers(false);
+    }
+  }, [userPosition]);
+
+  const handleSelectEvent = useCallback((ev: CommunityEvent) => {
+    setFocusedEvent(ev);
+    if (focusResetRef.current) clearTimeout(focusResetRef.current);
+    focusResetRef.current = setTimeout(() => setFocusedEvent(null), 2500);
   }, []);
 
-  const handleAddEvent = () => {
-    if (!newTitle || !newLoc) return;
-    addEvent({
-      title: newTitle,
-      location: newLoc,
-      time: newTime,
-      description: newDesc,
-      coordinates: userLocation || { lat: 12.9716, lng: 77.5946 }
-    });
-    setNewTitle(''); setNewLoc(''); setNewTime(''); setNewDesc('');
-    setShowAdd(false);
-  };
+  // Initialize GPS on mount
+  useEffect(() => {
+    async function initLocation() {
+      const position = await locationService.getCurrentPosition();
+      if (position) {
+        setUserPosition(position);
+      }
+    }
+    initLocation();
 
-  const filteredEvents = events.filter(e => 
-    e.title.toLowerCase().includes(searchQuery.toLowerCase()) || 
-    e.location.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+    return () => {
+      locationService.clearWatch();
+    };
+  }, []);
+
+  const handleSetSafeZone = useCallback(() => {
+    if (!userPosition) return;
+    setSafeZone({ center: userPosition, radius });
+    setStatus('inside');
+  }, [userPosition, radius]);
+
+  const handleRadiusChange = useCallback((newRadius: number) => {
+    setRadius(newRadius);
+    if (safeZone) {
+      setSafeZone({ ...safeZone, radius: newRadius });
+    }
+  }, [safeZone]);
+
+  // Evaluate Geofence whenever position or safe zone changes
+  useEffect(() => {
+    if (!safeZone || !userPosition) {
+      if (status !== 'unknown') {
+        setTimeout(() => setStatus('unknown'), 0);
+      }
+      return;
+    }
+
+    const inside = isInsideGeofence(
+      userPosition.lat,
+      userPosition.lng,
+      safeZone.center.lat,
+      safeZone.center.lng,
+      safeZone.radius
+    );
+
+    const newStatus: GeofenceStatus = inside ? 'inside' : 'outside';
+
+    if (status === 'inside' && newStatus === 'outside') {
+      notificationService.sendGeofenceAlert();
+      setTimeout(() => setShowAlert(true), 0);
+    }
+
+    if (status !== newStatus) {
+      setTimeout(() => setStatus(newStatus), 0);
+    }
+  }, [userPosition, safeZone, status]);
+
+  // Auto-refresh nearby users on first GPS lock
+  useEffect(() => {
+    if (userPosition && nearbyUsers.length === 0) {
+      handleRefreshMap();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userPosition]);
+
+  const toggleTracking = useCallback(() => {
+    if (trackingState === 'tracking') {
+      locationService.clearWatch();
+      setTrackingState('idle');
+    } else {
+      setTrackingState('tracking');
+      locationService.watchPosition((pos, err) => {
+        if (err || !pos) {
+          setTrackingState('error');
+          return;
+        }
+        setUserPosition(pos);
+      });
+    }
+  }, [trackingState]);
 
   return (
-    <div className="min-h-screen bg-background text-on-surface">
-      <main className="max-w-4xl mx-auto px-6 pt-12 pb-32">
-        <header className="flex items-center justify-between mb-8">
-          <div>
-            <h1 className="text-3xl font-headline font-extrabold text-on-surface flex items-center gap-2">
-              <MapIcon className="text-orange-600 w-8 h-8" /> Community Hub
-            </h1>
-            <p className="text-sm text-outline mt-1 font-body">Connect with neighbors and local health initiatives.</p>
-          </div>
-          <button 
-            onClick={() => setShowAdd(!showAdd)}
-            className="w-12 h-12 bg-orange-600 text-white rounded-2xl flex items-center justify-center shadow-lg active:scale-95 transition-all"
-          >
-            <Plus />
-          </button>
-        </header>
+    <main className="relative w-full min-h-screen overflow-hidden bg-gray-50 flex flex-col">
+      <StatusBadge status={status} />
 
-        {/* SEARCH BAR */}
-        <div className="relative mb-8">
-          <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-outline w-5 h-5" />
-          <input 
-            type="text" 
-            placeholder="Search events, workshops, or clinics..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full bg-surface-container rounded-2xl py-4 pl-12 pr-4 outline-none focus:ring-2 focus:ring-orange-600 border border-outline-variant text-sm font-medium"
-          />
-        </div>
+      {/* Floating Header Actions (Top Right) */}
+      <div className="absolute top-6 right-6 z-40 flex flex-col gap-3 items-end">
+        <button
+          onClick={handleRefreshMap}
+          disabled={isRefreshingUsers || !userPosition}
+          className="bg-white/90 backdrop-blur-xl px-5 py-2.5 rounded-full shadow-[0_8px_30px_rgb(0,0,0,0.12)] border border-white/20 text-gray-900 font-bold text-xs tracking-tight flex items-center justify-center gap-2 hover:bg-white transition-all active:scale-[0.98] disabled:opacity-50 min-w-[120px]"
+        >
+          <svg className={`w-4 h-4 text-gray-900 ${isRefreshingUsers ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+          </svg>
+          {isRefreshingUsers ? 'Scanning...' : 'Refresh'}
+        </button>
 
-        {/* ADD EVENT OVERLAY */}
-        {showAdd && (
-          <div className="fixed inset-0 z-[60] flex items-center justify-center p-6 bg-black/40 backdrop-blur-sm">
-            <div className="bg-white rounded-[2rem] p-8 w-full max-w-md shadow-2xl relative animate-in zoom-in-95 duration-200">
-              <button 
-                onClick={() => setShowAdd(false)}
-                className="absolute top-6 right-6 text-outline hover:text-on-surface"
-              >
-                <Plus className="rotate-45" />
-              </button>
-              <h3 className="font-headline font-bold text-2xl mb-6">Create Community Event</h3>
-              
-              <div className="space-y-4">
-                <div>
-                  <label className="text-[10px] font-bold uppercase tracking-widest text-outline mb-1 block">Title</label>
-                  <input 
-                    value={newTitle} onChange={(e) => setNewTitle(e.target.value)}
-                    placeholder="e.g. Morning Yoga"
-                    className="w-full bg-surface-container rounded-xl py-3 px-4 outline-none border border-outline-variant text-sm"
-                  />
-                </div>
-                <div>
-                  <label className="text-[10px] font-bold uppercase tracking-widest text-outline mb-1 block">Location</label>
-                  <input 
-                    value={newLoc} onChange={(e) => setNewLoc(e.target.value)}
-                    placeholder="e.g. Ward 4 Community Center"
-                    className="w-full bg-surface-container rounded-xl py-3 px-4 outline-none border border-outline-variant text-sm"
-                  />
-                </div>
-                <div className="grid grid-cols-2 gap-4">
-                    <div>
-                        <label className="text-[10px] font-bold uppercase tracking-widest text-outline mb-1 block">Time</label>
-                        <input 
-                            value={newTime} onChange={(e) => setNewTime(e.target.value)}
-                            placeholder="Sat, 10 AM"
-                            className="w-full bg-surface-container rounded-xl py-3 px-4 outline-none border border-outline-variant text-sm"
-                        />
-                    </div>
-                </div>
-                <div>
-                  <label className="text-[10px] font-bold uppercase tracking-widest text-outline mb-1 block">Description</label>
-                  <textarea 
-                    value={newDesc} onChange={(e) => setNewDesc(e.target.value)}
-                    placeholder="Tell neighbors what's happening..."
-                    className="w-full bg-surface-container rounded-xl py-3 px-4 outline-none border border-outline-variant text-sm h-24 resize-none"
-                  />
-                </div>
-                <button 
-                  onClick={handleAddEvent}
-                  className="w-full bg-orange-600 text-white font-bold py-4 rounded-xl shadow-lg mt-4 active:scale-95 transition-all"
-                >
-                  Post Event
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
+        <button
+          onClick={() => setIsCommunityOpen(true)}
+          className="bg-white/90 backdrop-blur-xl px-5 py-2.5 rounded-full shadow-[0_8px_30px_rgb(0,0,0,0.12)] border border-white/20 text-gray-900 font-bold text-xs tracking-tight flex items-center gap-2 hover:bg-white transition-all active:scale-[0.98]"
+        >
+          <svg className="w-5 h-5 text-gray-900" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
+          </svg>
+          Community
+        </button>
+      </div>
 
-        {/* LIVE POSITION CARD */}
-        {userLocation && (
-          <div className="bg-orange-50 border border-orange-100 rounded-3xl p-6 mb-8 flex items-center justify-between">
-            <div className="flex items-center gap-4">
-                <div className="w-12 h-12 bg-white rounded-2xl flex items-center justify-center shadow-sm text-orange-600">
-                    <Navigation className="w-6 h-6" />
-                </div>
-                <div>
-                    <h4 className="font-bold text-orange-900 leading-none mb-1">Live GPS Active</h4>
-                    <p className="text-xs text-orange-700 opacity-80">Finding events within 5km of your current position.</p>
-                </div>
-            </div>
-            <div className="text-right">
-                <p className="text-[10px] font-bold uppercase tracking-widest text-orange-400 leading-none mb-1">Accuracy</p>
-                <p className="text-sm font-bold text-orange-800">High (GPS)</p>
-            </div>
-          </div>
-        )}
+      <AlertBanner isVisible={showAlert} onDismiss={() => setShowAlert(false)} />
 
-        {/* EVENT LIST */}
-        <div className="space-y-6">
-          {!isLoaded ? (
-            <div className="flex justify-center py-20">
-              <Plus className="animate-spin text-orange-400 w-12 h-12" />
-            </div>
-          ) : filteredEvents.length === 0 ? (
-            <div className="bg-white rounded-[2rem] p-12 text-center border border-surface-container border-dashed">
-                <Users className="w-12 h-12 text-outline mx-auto mb-4 opacity-50" />
-                <p className="text-outline font-medium">No results for "{searchQuery}". Try something else!</p>
-            </div>
-          ) : (
-            filteredEvents.map(event => (
-              <div key={event.id} className="bg-white rounded-[2rem] p-8 shadow-sm border border-surface-container relative overflow-hidden group hover:shadow-md transition-shadow">
-                <div className="relative z-10 flex flex-col md:flex-row gap-6">
-                  <div className="flex-1">
-                    <div className="flex items-center gap-2 mb-2">
-                        <span className="material-symbols-outlined text-orange-600 text-lg">event</span>
-                        <h3 className="text-2xl font-headline font-bold text-on-surface">{event.title}</h3>
-                    </div>
-                    <p className="text-on-surface-variant text-sm mb-6 leading-relaxed">{event.description}</p>
-                    
-                    <div className="flex flex-wrap gap-4">
-                      <div className="flex items-center gap-2 px-4 py-2 bg-surface-container rounded-xl text-xs font-bold text-outline">
-                        <MapPin className="w-3.5 h-3.5" /> {event.location}
-                      </div>
-                      <div className="flex items-center gap-2 px-4 py-2 bg-surface-container rounded-xl text-xs font-bold text-outline">
-                        <Calendar className="w-3.5 h-3.5" /> {event.time}
-                      </div>
-                    </div>
-                  </div>
+      <DynamicMapView
+        userPosition={userPosition}
+        safeZone={safeZone}
+        events={events}
+        focusedEvent={focusedEvent}
+        nearbyUsers={nearbyUsers}
+      />
 
-                  <div className="flex flex-col justify-between items-end md:w-32">
-                    <div className="bg-orange-50 text-orange-600 px-3 py-1 rounded-full text-xs font-black uppercase tracking-tighter shadow-sm mb-4">
-                        ★ {event.interestedCount} Interested
-                    </div>
-                    
-                    <div className="flex flex-col gap-2 w-full">
-                        <button 
-                          onClick={() => joinEvent(event.id)}
-                          disabled={event.joined}
-                          className={`w-full py-3 rounded-xl font-bold text-sm transition-all shadow-sm ${event.joined ? 'bg-emerald-100 text-emerald-700' : 'bg-orange-600 text-white active:scale-95'}`}
-                        >
-                          {event.joined ? 'Joined' : 'Join Event'}
-                        </button>
-                        <button 
-                          onClick={() => toggleInterested(event.id)}
-                          className={`w-full py-2 rounded-xl font-bold text-[10px] uppercase tracking-widest border transition-all ${event.isInterested ? 'bg-orange-50 border-orange-200 text-orange-600' : 'border-outline-variant text-outline'}`}
-                        >
-                          {event.isInterested ? 'Interested ✓' : 'Interested'}
-                        </button>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            ))
-          )}
-        </div>
-      </main>
+      <Controls
+        onSetSafeZone={handleSetSafeZone}
+        canSetSafeZone={!!userPosition}
+        radius={radius}
+        onRadiusChange={handleRadiusChange}
+        isTracking={trackingState === 'tracking'}
+        onToggleTracking={toggleTracking}
+      />
 
-      {/* BOTTOM NAV BAR */}
-      <nav className="fixed bottom-0 w-full z-50 flex justify-around items-center px-4 pb-6 pt-3 bg-surface-container-lowest/90 backdrop-blur-xl rounded-t-[2rem] shadow-[0_-8px_32px_rgba(0,0,0,0.06)] border border-surface-container">
-        <Link href="/" className="flex flex-col items-center justify-center text-outline hover:text-primary px-4 py-2.5 active:scale-95 transition-all outline-none">
-          <span className="material-symbols-outlined">medical_services</span>
-          <span className="text-[10px] font-medium font-body mt-1">Home</span>
-        </Link>
-        <Link href="/safety" className="flex flex-col items-center justify-center text-outline hover:text-primary px-4 py-2.5 active:scale-95 transition-all outline-none">
-          <span className="material-symbols-outlined">security</span>
-          <span className="text-[10px] font-medium font-body mt-1">Safety</span>
-        </Link>
-        <Link href="/web" className="flex flex-col items-center justify-center text-outline hover:text-primary px-4 py-2.5 active:scale-95 transition-all outline-none">
-          <span className="material-symbols-outlined">language</span>
-          <span className="text-[10px] font-medium font-body mt-1">Web</span>
-        </Link>
-        <Link href="/finance" className="flex flex-col items-center justify-center text-outline hover:text-primary px-4 py-2.5 active:scale-95 transition-all outline-none">
-          <span className="material-symbols-outlined">payments</span>
-          <span className="text-[10px] font-medium font-body mt-1">Finance</span>
-        </Link>
-        <div className="bg-orange-100/50 text-orange-700 flex flex-col items-center justify-center rounded-2xl px-5 py-2.5 active:scale-95 transition-all outline-none shadow-sm">
-          <span className="material-symbols-outlined" style={{ fontVariationSettings: "'FILL' 1" }}>map</span>
-          <span className="text-[10px] font-bold font-body mt-1">Map</span>
-        </div>
-      </nav>
-    </div>
+      <CommunityOverlay
+        isOpen={isCommunityOpen}
+        onClose={() => setIsCommunityOpen(false)}
+        userPosition={userPosition}
+        events={events}
+        addEvent={addEvent}
+        joinEvent={joinEvent}
+        toggleInterested={toggleInterested}
+        removeEvent={removeEvent}
+        isLoaded={isLoaded}
+        onSelectEvent={handleSelectEvent}
+      />
+    </main>
   );
 }

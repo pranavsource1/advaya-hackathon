@@ -37,7 +37,7 @@ document.addEventListener("DOMContentLoaded", () => {
         buttons: pageData.buttons
       };
 
-      const res = await fetch("http://localhost:8000/api/analyze-webpage", {
+      const res = await fetch("https://iprq-hackathonadvaya.hf.space/api/analyze-webpage", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload)

@@ -1,22 +1,17 @@
-'use client';
-
 import { useEffect } from 'react';
+import { Capacitor } from '@capacitor/core';
 import { startRealTimeSmsListener } from '../services/smsListener';
-import { FinanceTransaction } from '../lib/types';
+import { FinanceTransaction } from '@/lib/types';
 
-/**
- * useSMSListener: A hook to start listening for SMS transaction alerts.
- * When an SMS is detected, it triggers the onDetection callback.
- */
 export function useSMSListener(onDetection: (t: FinanceTransaction) => void) {
   useEffect(() => {
     let handler: { remove: () => void } | null = null;
 
     const init = async () => {
+      // SMS listener only works on Android native — skip silently on web
+      if (Capacitor.getPlatform() !== 'android') return;
       try {
-        console.log('Hook: Initializing SMS Listener...');
         handler = await startRealTimeSmsListener((transaction) => {
-          // Pass the parsed transaction back to the component
           onDetection(transaction);
         });
       } catch (err) {
